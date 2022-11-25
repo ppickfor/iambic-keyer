@@ -1,4 +1,13 @@
 # 	iambic-keyer
+        Adapted to use a serial dongle CTS and DSR and run on an intel laptop rather than a pi.
+        - https://gist.github.com/mmlb/7774348
+        - https://ham.stackexchange.com/questions/9121/how-to-use-a-linux-computer-as-a-paddle-key-code-practice-oscillator
+
+        Issues:
+        - no exit on ^c due to blocking call
+        - no guidence for jack audio configuration - I ended up using pasuspender -- sleep 100000000000000000 to supend pulse audio, jackctl as a regular user and wiring the iambic_keyer to the outputs in jackctl - still need some more work.
+        - no keyer output for the rig not that I need this as my usecase is just for practice
+        - not sure if there are latency issues or my bad cordination
 
         This keyer was adapted using Phil's verilog code from
         the openHPSDR Hermes iambic.v implementation to build

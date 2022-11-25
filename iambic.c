@@ -75,34 +75,19 @@ Boston, MA  02110-1301, USA.
 #include <pthread.h>
 #include <signal.h>
 #include <semaphore.h>
-
-#include <wiringPi.h>
-#include <softTone.h>
-#include <pigpio.h>
 #include "keyed_tone.h"
-
+#include <termios.h>
+#include <sys/ioctl.h>
+#include <fcntl.h>
 static void* keyer_thread(void *arg);
 static pthread_t keyer_thread_id;
-
-// GPIO pins
-// set to 0 to use the PI's hw:0 audio out for sidetone
-#define SIDETONE_GPIO 0 // this is in wiringPi notation
-
-#if 0
-#define KEYER_OUT_GPIO 12
-#define LEFT_PADDLE_GPIO 13
-#define RIGHT_PADDLE_GPIO 15
-#else
-#define KEYER_OUT_GPIO 12
-#define LEFT_PADDLE_GPIO 15
-#define RIGHT_PADDLE_GPIO 14
-#endif
 
 #define KEYER_STRAIGHT 0
 #define KEYER_MODE_A 1
 #define KEYER_MODE_B 2
 
 #define NSEC_PER_SEC (1000000000)
+#define SERIAL_DEVICE	"/dev/ttyUSB0"
 
 enum {
     CHECK = 0,
@@ -154,45 +139,22 @@ void keyer_update() {
         kdash = &kcwr;
     }
 }
-
-void keyer_event(int gpio, int level, uint32_t tick) {
-    int state = (cw_active_state == 0) ? (level == 0) : (level != 0);
-
-    if (gpio == LEFT_PADDLE_GPIO)
-        kcwl = state;
-    else  // RIGHT_PADDLE_GPIO
-        kcwr = state;
-
-    if (state || cw_keyer_mode == KEYER_STRAIGHT)
-        sem_post(&cw_event);
-}
-
 void clear_memory() {
     dot_memory  = 0;
     dash_memory = 0;
 }
-
 void set_keyer_out(int state) {
     if (keyer_out != state) {
         keyer_out = state;
 
         if (state) {
-            gpioWrite(KEYER_OUT_GPIO, 1);
-            if (SIDETONE_GPIO)
-                softToneWrite (SIDETONE_GPIO, cw_keyer_sidetone_frequency);
-            else
                 keyed_tone_mute = 2;
         }
         else {
-            gpioWrite(KEYER_OUT_GPIO, 0);
-            if (SIDETONE_GPIO)
-                softToneWrite (SIDETONE_GPIO, 0);
-            else
                 keyed_tone_mute = 1;
         }
     }
 }
-
 static void* keyer_thread(void *arg) {
     int pos;
     struct timespec loop_delay;
@@ -376,6 +338,13 @@ int main (int argc, char **argv) {
     char snd_dev[64]="hw:0";
     struct sched_param param;
 
+    int fd;
+    int retval;
+    int serial;
+    int oldserial=0;
+    struct termios termAttr;
+    struct sigaction saio;
+
     for (i = 1; i < argc; i++)
         if (argv[i][0] == '-')
             switch (argv[i][1]) {
@@ -425,40 +394,17 @@ int main (int argc, char **argv) {
             perror(argv[i]), exit(1);
         i++;
     }
-
-    if(gpioInitialise()<0) {
-        fprintf(stderr,"Cannot initialize GPIO\n");
-        return -1;
+    fd = open(SERIAL_DEVICE, O_RDWR);
+    if (fd < 0) {
+      perror("Failed to open SERIAL_DEVICE");
+      exit(1);
     }
-
-    gpioSetMode(RIGHT_PADDLE_GPIO, PI_INPUT);
-    gpioSetPullUpDown(RIGHT_PADDLE_GPIO,PI_PUD_UP);
-    usleep(100000);
-    gpioSetAlertFunc(RIGHT_PADDLE_GPIO, keyer_event);
-    gpioSetMode(LEFT_PADDLE_GPIO, PI_INPUT);
-    gpioSetPullUpDown(LEFT_PADDLE_GPIO,PI_PUD_UP);
-    usleep(100000);
-    gpioSetAlertFunc(LEFT_PADDLE_GPIO, keyer_event);
-    gpioSetMode(KEYER_OUT_GPIO, PI_OUTPUT);
-    gpioWrite(KEYER_OUT_GPIO, 0);
-
     keyer_update();
-
-    if (wiringPiSetup () < 0) {
-        printf ("Unable to setup wiringPi: %s\n", strerror (errno));
-        return 1;
+    i = keyed_tone_start(cw_keyer_sidetone_gain, cw_keyer_sidetone_frequency, cw_keyer_sidetone_envelope);
+    if(i < 0) {
+        fprintf(stderr,"keyed_tone_start failed %d\n", i);
+        exit(-1);
     }
-
-    if (SIDETONE_GPIO)
-        softToneCreate(SIDETONE_GPIO);
-    else {
-        i = keyed_tone_start(cw_keyer_sidetone_gain, cw_keyer_sidetone_frequency, cw_keyer_sidetone_envelope);
-        if(i < 0) {
-            fprintf(stderr,"keyed_tone_start failed %d\n", i);
-            exit(-1);
-        }
-    }
-
     i = sem_init(&cw_event, 0, 0);
     running = 1;
     i |= pthread_create(&keyer_thread_id, NULL, keyer_thread, NULL);
@@ -469,6 +415,30 @@ int main (int argc, char **argv) {
 
     signal(SIGINT, sig_handler);
     signal(SIGKILL, sig_handler);
+
+    while (running) {
+      int state = 0;
+      retval = ioctl(fd, TIOCMIWAIT, TIOCM_CTS|TIOCM_DSR);
+      if (retval < 0) {
+        perror("ioctl() failed");
+        exit(0);
+      }
+      retval = ioctl(fd, TIOCMGET, &serial);
+      if (retval < 0) {
+        perror("ioctl() failed");
+        exit(0);
+      }
+      if (serial & TIOCM_CTS)
+        kcwl = 1;
+      else
+        kcwl = 0;
+      if (serial & TIOCM_DSR)
+        kcwr = 1;
+      else
+        kcwr = 0;
+      sem_post(&cw_event);
+    }
+
     pthread_join(keyer_thread_id, 0);
     keyed_tone_close();
     sem_destroy(&cw_event);
